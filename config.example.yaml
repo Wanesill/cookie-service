@@ -1,0 +1,8 @@
+capsolver_api_key: ""
+geetest_captcha_id: ""
+cookies_folder: "./cookies"
+check_interval: 10
+headed: false
+page_load_timeout: 30000
+captcha_poll_interval: 3.0
+captcha_max_poll_time: 120.0
