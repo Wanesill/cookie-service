@@ -164,6 +164,8 @@ def load_cookies(file_path: Path) -> tuple[list[dict], str]:
 
     pw_cookies = []
     for name, value in raw_cookies.items():
+        if value is None:
+            continue
         pw_cookies.append(
             {
                 "name": name,
