@@ -1,4 +1,6 @@
+captcha_service: "capsolver"    # "capsolver" или "2captcha"
 capsolver_api_key: ""
+twocaptcha_api_key: ""          # API-ключ 2captcha
 geetest_captcha_id: ""
 cookies_folder: "./cookies"
 check_interval: 10

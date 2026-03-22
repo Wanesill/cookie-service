@@ -35,6 +35,7 @@ log = logging.getLogger("cookie-service")
 AVITO_URL = "https://www.avito.ru"
 GEETEST_CAPTCHA_ID_DEFAULT = "2d9c743cf7d63dbc9db578a608196bcd"
 CAPSOLVER_API = "https://api.capsolver.com"
+TWOCAPTCHA_API = "https://api.2captcha.com"
 
 # --- Defaults ---
 
@@ -46,6 +47,7 @@ DEFAULTS = {
     "page_load_timeout": 30_000,
     "captcha_poll_interval": 3.0,
     "captcha_max_poll_time": 120.0,
+    "captcha_service": "capsolver",
 }
 
 
@@ -73,8 +75,17 @@ def load_config(path: str = "config.yaml") -> dict:
 
     config = {**DEFAULTS, **raw}
 
-    if not config.get("capsolver_api_key"):
+    service = config.get("captcha_service", "capsolver")
+    if service not in ("capsolver", "2captcha"):
+        log.error("captcha_service должен быть 'capsolver' или '2captcha', получено: '%s'", service)
+        sys.exit(1)
+
+    if service == "capsolver" and not config.get("capsolver_api_key"):
         log.error("capsolver_api_key не указан в %s", p)
+        sys.exit(1)
+
+    if service == "2captcha" and not config.get("twocaptcha_api_key"):
+        log.error("twocaptcha_api_key не указан в %s", p)
         sys.exit(1)
 
     return config
@@ -148,6 +159,78 @@ async def capsolver_solve(api_key: str, captcha_id: str, config: dict) -> dict:
                 return data["solution"]
 
     log.error("  Таймаут CapSolver (%.0fс)", max_poll_time)
+    return {}
+
+
+# ═══════════════════════════════════════════════════════════════
+# Секция B2: 2captcha
+# ═══════════════════════════════════════════════════════════════
+
+
+async def twocaptcha_balance(api_key: str) -> float | None:
+    async with httpx.AsyncClient(timeout=10) as client:
+        resp = await client.post(
+            f"{TWOCAPTCHA_API}/getBalance",
+            json={"clientKey": api_key},
+        )
+        data = resp.json()
+
+    if data.get("errorId", 0) != 0:
+        log.error("2captcha balance error: %s", data.get("errorDescription", "unknown"))
+        return None
+
+    balance = data.get("balance", 0)
+    log.info("2captcha баланс: $%.4f", balance)
+    return balance
+
+
+async def twocaptcha_solve(api_key: str, captcha_id: str, config: dict) -> dict:
+    poll_interval = config["captcha_poll_interval"]
+    max_poll_time = config["captcha_max_poll_time"]
+
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.post(
+            f"{TWOCAPTCHA_API}/createTask",
+            json={
+                "clientKey": api_key,
+                "task": {
+                    "type": "GeeTestTaskProxyless",
+                    "websiteURL": AVITO_URL,
+                    "gt": captcha_id,
+                    "version": 4,
+                },
+            },
+        )
+        data = resp.json()
+
+    if data.get("errorId", 0) != 0:
+        log.error("2captcha createTask error: %s", data.get("errorDescription"))
+        return {}
+
+    task_id = data["taskId"]
+    log.info("  Задача: %s", task_id)
+
+    start = time.monotonic()
+    async with httpx.AsyncClient(timeout=30) as client:
+        while (time.monotonic() - start) < max_poll_time:
+            await asyncio.sleep(poll_interval)
+
+            resp = await client.post(
+                f"{TWOCAPTCHA_API}/getTaskResult",
+                json={"clientKey": api_key, "taskId": task_id},
+            )
+            data = resp.json()
+
+            if data.get("errorId", 0) != 0:
+                log.error("2captcha poll error: %s", data.get("errorDescription"))
+                return {}
+
+            if data.get("status") == "ready":
+                elapsed = time.monotonic() - start
+                log.info("  Решено за %.1fс", elapsed)
+                return data["solution"]
+
+    log.error("  Таймаут 2captcha (%.0fс)", max_poll_time)
     return {}
 
 
@@ -237,7 +320,8 @@ async def verify_captcha(page: Page, geetest_response: dict) -> dict:
 
 async def process_cookie_file(file_path: Path, config: dict) -> bool:
     """Обрабатывает один cookie-файл. Возвращает True при успехе."""
-    api_key = config["capsolver_api_key"]
+    service = config["captcha_service"]
+    api_key = config["twocaptcha_api_key"] if service == "2captcha" else config["capsolver_api_key"]
     headed = config["headed"]
     page_load_timeout = config["page_load_timeout"]
 
@@ -319,9 +403,13 @@ async def process_cookie_file(file_path: Path, config: dict) -> bool:
             return False
 
         # [3] Решаем GeeTest v4
-        log.info("[3/5] Решение GeeTest v4 через CapSolver")
+        service_name = "2captcha" if service == "2captcha" else "CapSolver"
+        log.info("[3/5] Решение GeeTest v4 через %s", service_name)
         captcha_id = config["geetest_captcha_id"]
-        solution = await capsolver_solve(api_key, captcha_id, config)
+        if service == "2captcha":
+            solution = await twocaptcha_solve(api_key, captcha_id, config)
+        else:
+            solution = await capsolver_solve(api_key, captcha_id, config)
 
         if not solution:
             log.error("  Капча не решена")
@@ -370,7 +458,10 @@ async def run_daemon(config: dict) -> None:
     log.info("Daemon запущен. Папка: %s, интервал: %dс", cookies_folder, interval)
 
     # Проверка баланса при старте
-    await capsolver_balance(config["capsolver_api_key"])
+    if config["captcha_service"] == "2captcha":
+        await twocaptcha_balance(config["twocaptcha_api_key"])
+    else:
+        await capsolver_balance(config["capsolver_api_key"])
 
     while True:
         files = sorted(cookies_folder.glob("*.json"), key=lambda f: f.stat().st_mtime)
