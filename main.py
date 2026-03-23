@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import signal
 import sys
@@ -201,7 +202,11 @@ async def twocaptcha_solve(api_key: str, captcha_id: str, config: dict) -> dict:
                 },
             },
         )
-        data = resp.json()
+        try:
+            data = resp.json()
+        except json.JSONDecodeError:
+            log.error("2captcha createTask: невалидный JSON (status=%s): %s", resp.status_code, resp.text[:500])
+            return {}
 
     if data.get("errorId", 0) != 0:
         log.error("2captcha createTask error: %s", data.get("errorDescription"))
@@ -219,7 +224,11 @@ async def twocaptcha_solve(api_key: str, captcha_id: str, config: dict) -> dict:
                 f"{TWOCAPTCHA_API}/getTaskResult",
                 json={"clientKey": api_key, "taskId": task_id},
             )
-            data = resp.json()
+            try:
+                data = resp.json()
+            except json.JSONDecodeError:
+                log.error("2captcha getTaskResult: невалидный JSON (status=%s): %s", resp.status_code, resp.text[:500])
+                return {}
 
             if data.get("errorId", 0) != 0:
                 log.error("2captcha poll error: %s", data.get("errorDescription"))
